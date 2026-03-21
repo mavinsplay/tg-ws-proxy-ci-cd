@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import base64
 import logging
+import logging.handlers
 import os
 import socket as _socket
 import ssl
@@ -144,6 +145,7 @@ _st_I_net = struct.Struct('!I')
 _st_Ih = struct.Struct('<Ih')
 _st_I_le = struct.Struct('<I')
 _VALID_PROTOS = frozenset((0xEFEFEFEF, 0xEEEEEEEE, 0xDDDDDDDD))
+_WS_PING_FRAME = _st_BB4s.pack(0x80 | 0x9, 0x80 | 0, os.urandom(4))
 
 
 class RawWebSocket:
@@ -154,6 +156,7 @@ class RawWebSocket:
     proxy), performs the HTTP Upgrade handshake, and provides send/recv
     for binary frames with proper masking, ping/pong, and close handling.
     """
+    __slots__ = ('reader', 'writer', '_closed')
 
     OP_CONTINUATION = 0x0
     OP_TEXT = 0x1
@@ -670,8 +673,7 @@ async def _bridge_ws(reader, writer, ws: RawWebSocket, label,
                 idle = asyncio.get_event_loop().time() - last_recv_time
                 if idle >= 2 and not ws._closed:
                     try:
-                        ws.writer.write(
-                            ws._build_frame(ws.OP_PING, b'', mask=True))
+                        ws.writer.write(_WS_PING_FRAME)
                         await ws.writer.drain()
                         log.debug("[%s] %s WS PING (idle %.1fs)",
                                   label, dc_tag, idle)
@@ -1156,6 +1158,16 @@ def main():
                          ' --dc-ip 2:149.154.167.220')
     ap.add_argument('-v', '--verbose', action='store_true',
                     help='Debug logging')
+    ap.add_argument('--log-file', type=str, default=None, metavar='PATH',
+                    help='Log to file with rotation (default: stderr only)')
+    ap.add_argument('--log-max-mb', type=float, default=5, metavar='MB',
+                    help='Max log file size in MB before rotation (default 5)')
+    ap.add_argument('--log-backups', type=int, default=0, metavar='N',
+                    help='Number of rotated log files to keep (default 0)')
+    ap.add_argument('--buf-kb', type=int, default=256, metavar='KB',
+                    help='Socket send/recv buffer size in KB (default 256)')
+    ap.add_argument('--pool-size', type=int, default=4, metavar='N',
+                    help='WS connection pool size per DC (default 4, min 0)')
     args = ap.parse_args()
 
     if not args.dc_ip:
@@ -1167,11 +1179,30 @@ def main():
         log.error(str(e))
         sys.exit(1)
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format='%(asctime)s  %(levelname)-5s  %(message)s',
-        datefmt='%H:%M:%S',
-    )
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    log_fmt = logging.Formatter('%(asctime)s  %(levelname)-5s  %(message)s',
+                                datefmt='%H:%M:%S')
+    root = logging.getLogger()
+    root.setLevel(log_level)
+
+    console = logging.StreamHandler()
+    console.setFormatter(log_fmt)
+    root.addHandler(console)
+
+    if args.log_file:
+        fh = logging.handlers.RotatingFileHandler(
+            args.log_file,
+            maxBytes=max(32 * 1024, args.log_max_mb * 1024 * 1024),
+            backupCount=max(0, args.log_backups),
+            encoding='utf-8',
+        )
+        fh.setFormatter(log_fmt)
+        root.addHandler(fh)
+
+    global _RECV_BUF, _SEND_BUF, _WS_POOL_SIZE
+    _RECV_BUF = max(4, args.buf_kb) * 1024
+    _SEND_BUF = _RECV_BUF
+    _WS_POOL_SIZE = max(0, args.pool_size)
 
     try:
         asyncio.run(_run(args.port, dc_opt, host=args.host))
