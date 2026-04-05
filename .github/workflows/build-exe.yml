@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Версия сборки (например: 1.2.1)"
+        description: "Версия сборки"
         required: true
         type: string
       changelog:
@@ -89,7 +89,6 @@ jobs:
           VERSION="v${{ github.event.inputs.version }}"
           CHANGELOG="${{ github.event.inputs.changelog }}"
 
-          # Превращаем строки changelog в markdown-список
           FORMATTED=$(echo "$CHANGELOG" | sed 's/^/- /')
 
           cat <<EOF > release_body.md
@@ -98,8 +97,6 @@ jobs:
           ${FORMATTED}
 
           ---
-
-          ### Установка (Windows)
 
           Скачайте \`TgWsProxy_windows.exe\` и запустите.  
           При первом запуске откроется окно с инструкцией по подключению Telegram Desktop.
