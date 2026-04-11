@@ -7,10 +7,6 @@ on:
         description: "Версия сборки"
         required: true
         type: string
-      changelog:
-        description: "Описание изменений для релиза (каждый пункт с новой строки)"
-        required: false
-        default: "Сборка выполнена вручную."
 
 jobs:
   build-windows:
@@ -18,8 +14,9 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+      - name: Clone upstream tg-ws-proxy
+        run: |
+          git clone https://github.com/Flowseal/tg-ws-proxy.git src
 
       - name: Set up Python 3.12 (x64)
         uses: actions/setup-python@v5
@@ -27,45 +24,46 @@ jobs:
           python-version: "3.12"
           architecture: "x64"
 
-      - name: Download tg_ws_proxy.py from upstream
-        shell: pwsh
-        run: |
-          $url = "https://raw.githubusercontent.com/Flowseal/tg-ws-proxy/main/proxy/tg_ws_proxy.py"
-          Invoke-WebRequest -Uri $url -OutFile tg_ws_proxy.py
-
       - name: Install dependencies
         shell: pwsh
+        working-directory: src
         run: |
           python -m pip install --upgrade pip
-          # Установка зависимостей скрипта
-          pip install cryptography
-          # Установка PyInstaller для сборки EXE
-          pip install pyinstaller
+          pip install `
+            cryptography `
+            customtkinter `
+            pystray `
+            Pillow `
+            pyinstaller
 
-      - name: Build EXE with PyInstaller
+      - name: Build EXE with upstream windows.spec
         shell: pwsh
+        working-directory: src
         run: |
-          pyinstaller `
-            --onefile `
-            --name "TgWsProxy_windows" `
-            --target-arch x86_64 `
-            --clean `
-            tg_ws_proxy.py
+          pyinstaller packaging/windows.spec --noconfirm --clean
+
+      - name: Rename EXE to include platform suffix
+        shell: pwsh
+        working-directory: src
+        run: |
+          Rename-Item -Path "dist\TgWsProxy.exe" -NewName "TgWsProxy_windows.exe"
 
       - name: Verify build output
         shell: pwsh
+        working-directory: src
         run: |
           if (-Not (Test-Path "dist\TgWsProxy_windows.exe")) {
             Write-Error "EXE не найден — сборка провалилась"
             exit 1
           }
-          Write-Host "Сборка успешна: $(Get-Item dist\TgWsProxy_windows.exe | Select-Object -ExpandProperty Length) байт"
+          $size = (Get-Item "dist\TgWsProxy_windows.exe").Length / 1MB
+          Write-Host ("Сборка успешна: {0:N1} МБ" -f $size)
 
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
         with:
           name: TgWsProxy-windows-x64
-          path: dist/TgWsProxy_windows.exe
+          path: src/dist/TgWsProxy_windows.exe
           retention-days: 7
 
   release:
@@ -83,28 +81,41 @@ jobs:
           name: TgWsProxy-windows-x64
           path: dist/
 
-      - name: Format release body
-        id: body
+      - name: Fetch upstream release notes by tag
+        id: upstream
         run: |
           VERSION="v${{ github.event.inputs.version }}"
-          CHANGELOG="${{ github.event.inputs.changelog }}"
+          echo "Fetching release notes for tag ${VERSION}..."
 
-          FORMATTED=$(echo "$CHANGELOG" | sed 's/^/- /')
+          RESPONSE=$(curl -sf \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/Flowseal/tg-ws-proxy/releases/tags/${VERSION}")
+
+          if [ $? -ne 0 ]; then
+            echo "body=Сборка выполнена вручную. Релиз upstream не найден для тега ${VERSION}." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Извлекаем body релиза и сохраняем в файл (многострочный output)
+          echo "$RESPONSE" | jq -r '.body // "Описание отсутствует."' > upstream_body.md
+          echo "Upstream release notes получены успешно"
+
+      - name: Build release body
+        run: |
+          VERSION="v${{ github.event.inputs.version }}"
 
           cat <<EOF > release_body.md
-          ## TG WS Proxy ${VERSION}
-
-          ${FORMATTED}
+          $(cat upstream_body.md)
 
           ---
 
-          Скачайте \`TgWsProxy_windows.exe\` и запустите.  
+          ### Установка (Windows)
+
+          Скачайте \`TgWsProxy_windows.exe\` и запустите.
           При первом запуске откроется окно с инструкцией по подключению Telegram Desktop.
 
-          > Сборка выполнена автоматически через GitHub Actions из исходного кода.
+          > Сборка выполнена автоматически через GitHub Actions из [открытого исходного кода](https://github.com/Flowseal/tg-ws-proxy).
           EOF
-
-          echo "tag=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Create draft release
         uses: softprops/action-gh-release@v2
