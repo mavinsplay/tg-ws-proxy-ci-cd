@@ -4,9 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Версия сборки"
+        description: "Версия сборки (например: 1.6.0)"
         required: true
         type: string
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
@@ -15,42 +18,67 @@ jobs:
 
     steps:
       - name: Clone upstream tg-ws-proxy
-        run: |
-          git clone https://github.com/Flowseal/tg-ws-proxy.git src
+        run: git clone https://github.com/Flowseal/tg-ws-proxy.git src
 
       - name: Set up Python 3.12 (x64)
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           architecture: "x64"
+          cache: "pip"
 
+      # Точно как у Flowseal — нужен MSVC 14.40 для сборки cryptography
+      - name: Setup MSVC 14.40 toolset
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          toolset: 14.40
+
+      # pip install . — ставит все зависимости из pyproject.toml/setup.cfg репо
       - name: Install dependencies
-        shell: pwsh
         working-directory: src
-        run: |
-          python -m pip install --upgrade pip
-          pip install `
-            cryptography `
-            customtkinter `
-            pystray `
-            Pillow `
-            pyinstaller
+        run: pip install .
 
-      - name: Build EXE with upstream windows.spec
-        shell: pwsh
+      # Собираем PyInstaller из исходников (как у Flowseal) — убирает детект антивирусами
+      - name: Build PyInstaller bootloader from source
         working-directory: src
-        run: |
-          pyinstaller packaging/windows.spec --noconfirm --clean
+        run: pip install "pyinstaller==6.16.0" --no-binary pyinstaller
+        env:
+          PYINSTALLER_COMPILE_BOOTLOADER: 1
 
-      - name: Rename EXE to include platform suffix
-        shell: pwsh
+      - name: Build EXE with PyInstaller
         working-directory: src
+        run: pyinstaller packaging/windows.spec --noconfirm
+
+      # Стираем Rich PE header — снижает срабатывания антивирусов
+      - name: Strip Rich PE header
+        working-directory: src
+        shell: bash
         run: |
-          Rename-Item -Path "dist\TgWsProxy.exe" -NewName "TgWsProxy_windows.exe"
+          python -c "
+          import struct, pathlib
+          exe = pathlib.Path('dist/TgWsProxy.exe')
+          data = bytearray(exe.read_bytes())
+          rich = data.find(b'Rich')
+          if rich == -1:
+              raise SystemExit('Rich header not found')
+          ck = struct.unpack_from('<I', data, rich + 4)[0]
+          dans = struct.pack('<I', 0x536E6144 ^ ck)
+          ds = data.find(dans)
+          if ds == -1:
+              raise SystemExit('DanS marker not found')
+          data[ds:rich + 8] = b'\x00' * (rich + 8 - ds)
+          exe.write_bytes(data)
+          print(f'Stripped Rich header: offset {ds}..{rich+8}')
+          "
+
+      - name: Rename artifact
+        working-directory: src
+        shell: bash
+        run: mv dist/TgWsProxy.exe dist/TgWsProxy_windows.exe
 
       - name: Verify build output
-        shell: pwsh
         working-directory: src
+        shell: pwsh
         run: |
           if (-Not (Test-Path "dist\TgWsProxy_windows.exe")) {
             Write-Error "EXE не найден — сборка провалилась"
@@ -71,9 +99,6 @@ jobs:
     needs: build-windows
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: write
-
     steps:
       - name: Download EXE artifact
         uses: actions/download-artifact@v4
@@ -82,7 +107,6 @@ jobs:
           path: dist/
 
       - name: Fetch upstream release notes by tag
-        id: upstream
         run: |
           VERSION="v${{ github.event.inputs.version }}"
           echo "Fetching release notes for tag ${VERSION}..."
@@ -92,37 +116,33 @@ jobs:
             "https://api.github.com/repos/Flowseal/tg-ws-proxy/releases/tags/${VERSION}")
 
           if [ $? -ne 0 ]; then
-            echo "body=Сборка выполнена вручную. Релиз upstream не найден для тега ${VERSION}." >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "Upstream release not found for tag ${VERSION}, using fallback."
+            echo "Сборка выполнена вручную. Релиз upstream не найден для тега ${VERSION}." > upstream_body.md
+          else
+            echo "$RESPONSE" | jq -r '.body // "Описание отсутствует."' > upstream_body.md
+            echo "Release notes fetched successfully."
           fi
-
-          # Извлекаем body релиза и сохраняем в файл (многострочный output)
-          echo "$RESPONSE" | jq -r '.body // "Описание отсутствует."' > upstream_body.md
-          echo "Upstream release notes получены успешно"
 
       - name: Build release body
         run: |
-          VERSION="v${{ github.event.inputs.version }}"
-
-          cat <<EOF > release_body.md
-          $(cat upstream_body.md)
+          cat <<'FOOTER' >> upstream_body.md
 
           ---
 
           ### Установка (Windows)
 
-          Скачайте \`TgWsProxy_windows.exe\` и запустите.
+          Скачайте `TgWsProxy_windows.exe` и запустите.
           При первом запуске откроется окно с инструкцией по подключению Telegram Desktop.
 
           > Сборка выполнена автоматически через GitHub Actions из [открытого исходного кода](https://github.com/Flowseal/tg-ws-proxy).
-          EOF
+          FOOTER
 
       - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v${{ github.event.inputs.version }}"
           name: "TG WS Proxy v${{ github.event.inputs.version }}"
-          body_path: release_body.md
+          body_path: upstream_body.md
           draft: true
           prerelease: false
           files: dist/TgWsProxy_windows.exe
