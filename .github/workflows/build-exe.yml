@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Версия сборки (например: 1.6.0)"
+        description: "Версия"
         required: true
         type: string
 
@@ -27,18 +27,15 @@ jobs:
           architecture: "x64"
           cache: "pip"
 
-      # Точно как у Flowseal — нужен MSVC 14.40 для сборки cryptography
       - name: Setup MSVC 14.40 toolset
         uses: ilammy/msvc-dev-cmd@v1
         with:
           toolset: 14.40
 
-      # pip install . — ставит все зависимости из pyproject.toml/setup.cfg репо
       - name: Install dependencies
         working-directory: src
         run: pip install .
 
-      # Собираем PyInstaller из исходников (как у Flowseal) — убирает детект антивирусами
       - name: Build PyInstaller bootloader from source
         working-directory: src
         run: pip install "pyinstaller==6.16.0" --no-binary pyinstaller
@@ -49,7 +46,6 @@ jobs:
         working-directory: src
         run: pyinstaller packaging/windows.spec --noconfirm
 
-      # Стираем Rich PE header — снижает срабатывания антивирусов
       - name: Strip Rich PE header
         working-directory: src
         shell: bash
