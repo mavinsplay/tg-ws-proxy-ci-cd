@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Версия"
+        description: "Версия сборки"
         required: true
         type: string
 
@@ -25,7 +25,6 @@ jobs:
         with:
           python-version: "3.12"
           architecture: "x64"
-          cache: "pip"
 
       - name: Setup MSVC 14.40 toolset
         uses: ilammy/msvc-dev-cmd@v1
@@ -33,44 +32,25 @@ jobs:
           toolset: 14.40
 
       - name: Install dependencies
-        working-directory: src
-        run: pip install .
-
-      - name: Build PyInstaller bootloader from source
-        working-directory: src
-        run: pip install "pyinstaller==6.16.0" --no-binary pyinstaller
+        run: pip install cryptography pyinstaller --no-binary pyinstaller
         env:
           PYINSTALLER_COMPILE_BOOTLOADER: 1
 
       - name: Build EXE with PyInstaller
         working-directory: src
-        run: pyinstaller packaging/windows.spec --noconfirm
-
-      - name: Strip Rich PE header
-        working-directory: src
-        shell: bash
         run: |
-          python -c "
-          import struct, pathlib
-          exe = pathlib.Path('dist/TgWsProxy.exe')
-          data = bytearray(exe.read_bytes())
-          rich = data.find(b'Rich')
-          if rich == -1:
-              raise SystemExit('Rich header not found')
-          ck = struct.unpack_from('<I', data, rich + 4)[0]
-          dans = struct.pack('<I', 0x536E6144 ^ ck)
-          ds = data.find(dans)
-          if ds == -1:
-              raise SystemExit('DanS marker not found')
-          data[ds:rich + 8] = b'\x00' * (rich + 8 - ds)
-          exe.write_bytes(data)
-          print(f'Stripped Rich header: offset {ds}..{rich+8}')
-          "
-
-      - name: Rename artifact
-        working-directory: src
-        shell: bash
-        run: mv dist/TgWsProxy.exe dist/TgWsProxy_windows.exe
+          pyinstaller `
+            --onefile `
+            --name TgWsProxy_windows `
+            --paths proxy `
+            --hidden-import proxy `
+            --hidden-import proxy.bridge `
+            --hidden-import proxy.config `
+            --hidden-import proxy.fake_tls `
+            --hidden-import proxy.raw_websocket `
+            --hidden-import proxy.stats `
+            --hidden-import proxy.utils `
+            proxy/tg_ws_proxy.py
 
       - name: Verify build output
         working-directory: src
@@ -125,10 +105,13 @@ jobs:
 
           ---
 
-          ### Установка (Windows)
+          ### Установка (Windows CLI)
 
-          Скачайте `TgWsProxy_windows.exe` и запустите.
-          При первом запуске откроется окно с инструкцией по подключению Telegram Desktop.
+          Скачайте `TgWsProxy_windows.exe` и запустите через командную строку:
+
+          ```
+          TgWsProxy_windows.exe --port 1080 --secret <your_secret>
+          ```
 
           > Сборка выполнена автоматически через GitHub Actions из [открытого исходного кода](https://github.com/Flowseal/tg-ws-proxy).
           FOOTER
